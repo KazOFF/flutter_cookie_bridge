@@ -12,6 +12,8 @@ import 'package:url_launcher/url_launcher.dart';
 import 'session_manager.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:http/http.dart' as http;
+import 'package:flutter/services.dart';
+
 
 class WebView extends StatefulWidget {
   final String url;
@@ -54,8 +56,10 @@ class CustomWebViewState extends State<WebView> {
   Map<String, String>? _headers;
   bool _hasRedirected = false;
   String? _currentUserAgent;
-
+  bool _webInputFocused = false;
   final SessionManager _sessionManager = SessionManager();
+  static const _tag = '[PartnerWebView]';
+
   final String _defaultUserAgent = Platform.isIOS
       ? "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
       : "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1";
@@ -63,6 +67,49 @@ class CustomWebViewState extends State<WebView> {
   final String _karzaUserAgent = Platform.isIOS
       ? "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
       : "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/604.1";
+
+  static const String _focusTrackerJs = r"""
+    (function() {
+      if (window.__flutterFocusTrackerInstalled) return;
+      window.__flutterFocusTrackerInstalled = true;
+
+      function isEditable(el) {
+        return !!el && (
+          el.tagName === 'INPUT' ||
+          el.tagName === 'TEXTAREA' ||
+          el.isContentEditable === true
+        );
+      }
+
+      function notify(state) {
+        try { window.flutter_inappwebview.callHandler('inputFocus', state); } catch(e) {}
+      }
+
+      document.addEventListener('focus', function(e) {
+        if (isEditable(e.target)) { notify(true); }
+      }, true);
+
+      document.addEventListener('blur', function(e) {
+        // Defer to see if focus moved to another input
+        setTimeout(function() {
+          var ae = document.activeElement;
+          if (!isEditable(ae)) { notify(false); }
+        }, 0);
+      }, true);
+
+      // Provide a blur function callable from Flutter
+      window.__flutterBlurActive = function() {
+        try {
+          var ae = document.activeElement;
+          if (isEditable(ae)) {
+            ae.blur();
+            return true;
+          }
+        } catch(e) {}
+        return false;
+      };
+    })();
+  """;
 
   @override
   void initState() {
@@ -251,7 +298,8 @@ class CustomWebViewState extends State<WebView> {
         allowsAirPlayForMediaPlayback: true,
         disableInputAccessoryView: true,
         sharedCookiesEnabled: false,
-        limitsNavigationsToAppBoundDomains: false);
+        limitsNavigationsToAppBoundDomains: false,
+        useHybridComposition: true,);
   }
 
   Future<void> loadUrl(String url) async {
@@ -636,20 +684,45 @@ class CustomWebViewState extends State<WebView> {
     return NavigationActionPolicy.CANCEL;
   }
 
-  Future<bool> _onWillPop() async {
-    if (_webViewController != null && await _webViewController!.canGoBack()) {
-      await _webViewController!.goBack();
-      return Future.value(false);
+
+  Future<bool> _handleBack() async {
+    debugPrint('$_tag back pressed. webInputFocused=$_webInputFocused');
+
+    if (_webInputFocused) {
+      debugPrint('$_tag action=BLUR_INPUT (consume)');
+      try { await _webViewController?.evaluateJavascript(
+          source: "window.__flutterBlurActive && window.__flutterBlurActive();"); } catch (_) {}
+      try { await SystemChannels.textInput.invokeMethod('TextInput.hide'); } catch (_) {}
+      return true; // consumed
     }
-    return Future.value(true);
+
+    final canBack = _webViewController != null && await _webViewController!.canGoBack();
+    if (canBack) {
+      debugPrint('$_tag action=WEBVIEW_GO_BACK (consume)');
+      await _webViewController!.goBack();
+      return true; // consumed
+    }
+
+    debugPrint('$_tag action=ALLOW_ROUTE_POP');
+    return false; // not consumed
   }
+
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       resizeToAvoidBottomInset: true,
-      body: WillPopScope(
-          onWillPop: _onWillPop,
+      body: PopScope(
+          canPop: false,
+          onPopInvokedWithResult: (didPop, result) async {
+            final consumed = await _handleBack();
+            if (!consumed) {
+              // allow actual pop
+              if (Navigator.of(context).canPop()) {
+                Navigator.of(context).pop();
+              }
+            }
+          },
           child: SafeArea(
             child: InAppWebView(
               initialUrlRequest: URLRequest(
@@ -747,6 +820,19 @@ class CustomWebViewState extends State<WebView> {
               onWebViewCreated: (controller) async {
                 _webViewController = controller;
                 await _syncCookiesToWebView();
+
+                // ===== NEW: receive focus/blur state from injected JS =====
+                controller.addJavaScriptHandler(
+                  handlerName: 'inputFocus',
+                  callback: (args) {
+                    final focused = (args.isNotEmpty && args[0] == true);
+                    if (focused != _webInputFocused) {
+                      debugPrint('$_tag inputFocus=$focused');
+                      setState(() => _webInputFocused = focused);
+                    }
+                    return null;
+                  },
+                );
               },
               onLoadStart: (controller, url) async {
                 // await _syncCookiesToWebView();
@@ -781,12 +867,13 @@ class CustomWebViewState extends State<WebView> {
                   };
                 })();
               """);
+                await controller.evaluateJavascript(source: _focusTrackerJs);
               },
               onDownloadStartRequest: _onDownloadStartRequest,
               shouldOverrideUrlLoading: _shouldOverrideUrlLoading,
-              // onReceivedServerTrustAuthRequest: (controller, challenge) async {
-              //   return ServerTrustAuthResponse(action: ServerTrustAuthResponseAction.PROCEED);
-              // },
+              onReceivedServerTrustAuthRequest: (controller, challenge) async {
+                return ServerTrustAuthResponse(action: ServerTrustAuthResponseAction.PROCEED);
+              },
               shouldInterceptFetchRequest: (controller, fetchRequest) async {
                 final url = fetchRequest.url.toString();
                 if (url.contains('/api/user/redirect')) {
