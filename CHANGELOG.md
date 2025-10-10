@@ -199,3 +199,7 @@
 ## 1.1.168 - 2025-09-26
 
 - Added  redirect handling in fetchRequest
+
+## 1.1.169 - 2025-10-10
+
+- Tried to handle back navigation when keyboard is opened
