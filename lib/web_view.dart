@@ -253,7 +253,7 @@ class CustomWebViewState extends State<WebView> {
 
       // Verify cookies were set correctly
       final cookies =
-      await CookieManager.instance().getCookies(url: WebUri(_currentUrl!));
+      await CookieManager.instance().getAllCookies();
       debugPrint(
           'Cookies after sync: ${cookies.map((c) => '${c.name}=${c.value}').join('; ')}');
     } catch (e) {
