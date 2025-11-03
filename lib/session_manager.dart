@@ -15,12 +15,14 @@ class SessionManager {
 
   Future<void> saveSessionCookies(List<String> cookies) async {
     SharedPreferences prefs = await SharedPreferences.getInstance();
+    prefs.reload();
     String cookiesString = cookies.join('; ');
     await prefs.setString(_cookieKey, cookiesString);
   }
 
   Future<List<String>> getSessionCookies() async {
     SharedPreferences prefs = await SharedPreferences.getInstance();
+    prefs.reload();
     String? cookieString = prefs.getString(_cookieKey);
     if (cookieString != null && cookieString.isNotEmpty) {
       return cookieString.split('; ');
@@ -31,6 +33,7 @@ class SessionManager {
   Future<void> clearSession() async {
     try {
       SharedPreferences prefs = await SharedPreferences.getInstance();
+      prefs.reload();
       await prefs.remove(_cookieKey);
       await CookieManager.instance().deleteAllCookies();
     } catch (e) {
